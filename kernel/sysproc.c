@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -94,4 +95,38 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64 sys_trace(void) {
+  int traceMask;
+  struct proc *p = myproc();
+
+  if(argint(0, &traceMask) < 0)
+    return -1;
+
+  acquire(&p->lock);
+  p->traced = (uint64) traceMask; // turn trace-switch on
+  release(&p->lock);
+
+  return 0;
+}
+
+// ./grade-lab-syscall sysinfotest
+uint64 sys_sysinfo(void) {
+  uint64 usrAddr;
+  struct proc *p = myproc();
+  struct sysinfo info;
+
+  if(argaddr(0, &usrAddr) < 0)
+    return -1;
+
+  info.freemem = freesize();
+  info.nproc = procnumber();
+
+  // copy value pointed to by Kernel-Virtual-Adress to Physical-Memory-Position pointed to by User-Virtual-Memory
+  // because kenerl and user process have their own virtual address space  
+  if(copyout(p->pagetable, usrAddr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+
+  return 0;
 }

@@ -1,0 +1,2 @@
+Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+    Those system call(s) that only peek values in kernal and these values are not volatile can speed up in this way

@@ -432,3 +432,34 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+void vmprint_recur(pagetable_t pagetable, int level) {
+  if (level < 0 || pagetable == 0) {
+    return;
+  }
+
+  int i, j;
+
+  // Every page-table of any level has 2^9=512 entries(PTEs)
+  // Every PTE is 64-bit wide
+  for(i = 0; i < 512; i++) { // loop through page table
+    // pte_t pte = *(pagetable + i);
+    pte_t pte = pagetable[i];
+    if ((PTE_FLAGS(pte) & PTE_V) == 0) {
+      continue;
+    }
+    for(j=level; j < 3; j++) printf(" ..");
+    printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+    if (level > 0) {
+      // non-leaf node
+      uint64 child = PTE2PA(pte);
+      vmprint_recur((pagetable_t)child, level-1);
+    }
+  }
+  return;
+}
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  return vmprint_recur(pagetable, 2);
+}

@@ -80,7 +80,49 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 va, dest;
+  pte_t *ppte, pte;
+  int len;
+  if(argaddr(0, &va) < 0) return -1;
+  if(argint(1, &len) < 0) return -1;
+  if(argaddr(2, &dest) < 0) return -1;
+
+  int t, sz=sizeof(uint);
+  char mask[sz];
+  for (t=0; t < sz; t++) mask[t] = 0; // init mask array. IMPORTANT!!!
+  struct proc *p = myproc();
+  
+  // check len PTEs and maintain mask 
+  int i, x, y;
+  for(i=0; i < len; i++) {
+    ppte = walk(p->pagetable, va, 0);
+    if (ppte == 0) {
+      // next pte
+      va += PGSIZE;
+      continue;
+    }
+    pte = *ppte;
+    if((pte&PTE_V) >0 && (pte&PTE_A) >0) { // have been accessed by user mode
+      x = i >> 3;
+      y = i - (x << 3);
+      mask[x] = mask[x] | (1 << y);
+      
+      // clear PTE_A flag (should update TLB at the same time ?)
+      *ppte = pte & (~PTE_A);
+    }
+    // next pte
+    va += PGSIZE;
+  }
+
+  // flush TLB after all updations
+  sfence_vma();
+
+  // need not change mask array's byte-order, because it's little endian
+
+  // return value to user space from kenel space
+  if (copyout(p->pagetable, dest, mask, sz) < 0) // check pgaccess_test() in pgtbltest.c for the correct byte-order
+    return -1;
+
   return 0;
 }
 #endif

@@ -117,6 +117,7 @@ printf(char *fmt, ...)
 void
 panic(char *s)
 {
+  backtrace(); // print return address of stack frames in stack
   pr.locking = 0;
   printf("panic: ");
   printf(s);
@@ -131,4 +132,19 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+void backtrace(void) {
+  uint64 fp, base;
+  // 1.get fame pointer of current stack frame from RISC-V fp register
+  fp = r_fp();
+
+  // 2.get stack virtual-page's starting address (because xv6 allocate a 4K-page to any kernal/user stack)
+  base = PGROUNDDOWN(fp);
+
+  // 3.loop and print all frames in the stack
+  while (PGROUNDDOWN(fp) == base) { // error loop condition: fp > base. because bottom frame of the kernel stack may not in the same stack 
+    printf("%p\n", *(uint64*)(fp-8));
+    fp = *(uint64 *)(fp - 16);
+  }
 }

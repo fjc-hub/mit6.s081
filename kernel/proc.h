@@ -105,4 +105,21 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int ntick; // alarm interval
+  int consumeTicks; // this proc has consumed this ticks
+  int fnable; // 0=no alarm_fn registered; 1=alarm_fn waits for running; 2=alarm_fn running
+  uint64 alarm_fn; // alarm function's virtual address in user space
+
+  /* 
+    1.When kernel change process's epc in trampframe to alarm function, kernel should store following Caller-Saved registers
+    2.This change operation described above can be considered that a function in process calls the alarm function in any place inside it
+
+    Attention:
+      When Creating new process, you should allocate physical page for this structure
+      When Freeing a process, you should free this physical page pointed to by it
+      When Forking a process, you should deeply copy the content in physical page into new process's new page 
+  */
+  struct trapframe *alarmresumeregister; // a execution status of a process, can go back this status by this backup
+
 };

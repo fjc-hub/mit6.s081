@@ -119,9 +119,17 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->fnable = 0;
+  p->ntick = 1 << 31; // for safe
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  if((p->alarmresumeregister = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
     release(&p->lock);
     return 0;
@@ -153,6 +161,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->alarmresumeregister)
+    kfree((void*)p->alarmresumeregister);
+  p->alarmresumeregister = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -291,6 +302,9 @@ fork(void)
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
+
+  // copy alarmresumeregister
+  *np->alarmresumeregister = *p->alarmresumeregister;
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;

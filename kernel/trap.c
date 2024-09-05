@@ -76,9 +76,53 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  if(which_dev == 2) {
+    p->consumeTicks++;
+    // check if alarm function can be executed in user mode
+    if (p->consumeTicks >= p->ntick && p->fnable == 1) {
+      p->consumeTicks = 0;
+      p->fnable = 2;
+      // store All registers (representing A history Process-Status)
+      // back up a history status of the process
+      p->alarmresumeregister->epc = p->trapframe->epc;
+      p->alarmresumeregister->ra = p->trapframe->ra;
+      p->alarmresumeregister->sp = p->trapframe->sp;
+      p->alarmresumeregister->gp = p->trapframe->gp;
+      p->alarmresumeregister->tp = p->trapframe->tp;
+      p->alarmresumeregister->t0 = p->trapframe->t0;
+      p->alarmresumeregister->t1 = p->trapframe->t1;
+      p->alarmresumeregister->t2 = p->trapframe->t2;
+      p->alarmresumeregister->s0 = p->trapframe->s0;
+      p->alarmresumeregister->s1 = p->trapframe->s1;
+      p->alarmresumeregister->a0 = p->trapframe->a0;
+      p->alarmresumeregister->a1 = p->trapframe->a1;
+      p->alarmresumeregister->a2 = p->trapframe->a2;
+      p->alarmresumeregister->a3 = p->trapframe->a3;
+      p->alarmresumeregister->a4 = p->trapframe->a4;
+      p->alarmresumeregister->a5 = p->trapframe->a5;
+      p->alarmresumeregister->a6 = p->trapframe->a6;
+      p->alarmresumeregister->a7 = p->trapframe->a7;
+      p->alarmresumeregister->s2 = p->trapframe->s2;
+      p->alarmresumeregister->s3 = p->trapframe->s3;
+      p->alarmresumeregister->s4 = p->trapframe->s4;
+      p->alarmresumeregister->s5 = p->trapframe->s5;
+      p->alarmresumeregister->s6 = p->trapframe->s6;
+      p->alarmresumeregister->s7 = p->trapframe->s7;
+      p->alarmresumeregister->s8 = p->trapframe->s8;
+      p->alarmresumeregister->s9 = p->trapframe->s9;
+      p->alarmresumeregister->s10 = p->trapframe->s10;
+      p->alarmresumeregister->s11 = p->trapframe->s11;
+      p->alarmresumeregister->t3 = p->trapframe->t3;
+      p->alarmresumeregister->t4 = p->trapframe->t4;
+      p->alarmresumeregister->t5 = p->trapframe->t5;
+      p->alarmresumeregister->t6 = p->trapframe->t6;
+
+      // let user process CALLs alarm function
+      p->trapframe->epc = p->alarm_fn;
+    } else {
+      yield();
+    }
+  }
 
   usertrapret();
 }

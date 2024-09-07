@@ -65,11 +65,23 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15) { // check if this Store-Page-Fault occured in Copy-On-Write page
+
+    uint64 stval = r_stval(); // user space faulting address
+    // COW mechanism
+    if (copyonwrite(p->pagetable, stval) == MAXVA) {
+      // kill the process
+      p->killed = 1;
+      exit(-1);
+    }
+    // re-instruct faulting instruction
+    p->trapframe->epc = r_sepc();
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    printf("process name=%s\n", p->name);
     p->killed = 1;
   }
 

@@ -10,10 +10,34 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+// Saved registers for user thread context switches.
+struct ucontext {
+  uint64 ra;
+  uint64 sp;
+
+  // callee-saved
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+
+  // caller-saved registers no need to save explicitly by scheduler 
+  // because c compiler will store they automaticly when call function
+};
 
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
+  struct ucontext ucontext;     /* user level thread context */
+
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
@@ -62,6 +86,8 @@ thread_schedule(void)
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
      */
+    // restore scheduler's state(namely context), resume next_thread's state(namely its context)
+    thread_switch((uint64) &(t->ucontext), (uint64) &(current_thread->ucontext));
   } else
     next_thread = 0;
 }
@@ -76,6 +102,14 @@ thread_create(void (*func)())
   }
   t->state = RUNNABLE;
   // YOUR CODE HERE
+  // 1.set initial return-address and PC in context (ra register) for later scheduling resume execution
+  t->ucontext.ra = (uint64) func;
+  // 2.set initial stack pointer in context
+  t->ucontext.sp = (uint64)(t->stack + STACK_SIZE);  // stack grows down in XV6
+  // don't get into scheduler before creating all threads
+  // because there is not Timer-Interrupt after into thread_schedule()
+  // and never switch back into main()
+  // thread_schedule();
 }
 
 void 

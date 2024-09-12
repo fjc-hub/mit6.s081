@@ -19,7 +19,8 @@ static struct mbuf *rx_mbufs[RX_RING_SIZE];
 // remember where the e1000's registers live.
 static volatile uint32 *regs;
 
-struct spinlock e1000_lock;
+struct spinlock e1000_tx_lock;
+struct spinlock e1000_rx_lock;
 
 // called by pci_init().
 // xregs is the memory address at which the
@@ -29,7 +30,8 @@ e1000_init(uint32 *xregs)
 {
   int i;
 
-  initlock(&e1000_lock, "e1000");
+  initlock(&e1000_tx_lock, "e1000tx");
+  initlock(&e1000_rx_lock, "e1000rx");
 
   regs = xregs;
 
@@ -102,6 +104,29 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+  int i;
+  struct tx_desc *ds;
+  acquire(&e1000_tx_lock);
+
+  i = regs[E1000_TDT];
+  if ((tx_ring[i].status & E1000_TXD_STAT_DD) == 0) { // no space to write
+    release(&e1000_tx_lock);
+    return -1;
+  }
+  if (tx_mbufs[i]) {
+    mbuffree(tx_mbufs[i]);// free old mbuf
+  }
+  tx_mbufs[i] = m;
+
+  // set tx descriptor
+  ds = &tx_ring[i];
+  ds->length = m->len;
+  ds->addr = (uint64) m->head;
+  ds->status = 0;
+  ds->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+
+  regs[E1000_TDT] = (i+1)%TX_RING_SIZE;
+  release(&e1000_tx_lock);
   
   return 0;
 }
@@ -115,6 +140,56 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  int h,t,is_new = 1, write; // is new packet
+  struct rx_desc ds;
+  struct mbuf *parts; // a packet could be consisted of multiple descriptor
+
+  acquire(&e1000_rx_lock);
+  h = regs[E1000_RDH];
+  t = (regs[E1000_RDT]+1)%RX_RING_SIZE;
+  // check from tail to head for arrived packets
+  while(1) {
+    // printf("%d %d %d\n", h, t, is_new);
+    // 1.get read descriptor address(reading descriptors in memory rather than by I/O reads)
+    ds = rx_ring[t];
+    // 2.check if descriptor is empty
+    write = (ds.status & E1000_RXD_STAT_DD);
+    if (h==t && !write) { // ring is empty
+      if (!is_new) { // packet incompletes
+        continue;
+      }
+      break;
+    }
+    // 3.check if descriptor can be ready for fetching by software
+    if (write == 0) {
+      panic("e1000_recv: read incomplete descriptor");
+      return;
+    }
+    // 4.update next iteration arguments 
+    regs[E1000_RDT] = t; // upfate modification
+    h = regs[E1000_RDH];  // read modification
+    t = (t + 1)%RX_RING_SIZE;
+    // 5.read a part of the packet
+    if (is_new) {
+      is_new = 0;
+      parts = mbufalloc(0); // Create new buffer instead old buffer used by hardware
+    }
+    memmove((void *)(parts->buf + parts->len), (void *)ds.addr, (uint) ds.length);
+    parts->len += ds.length;
+    // 6.deliver an entire packet
+    if ((ds.status & E1000_RXD_STAT_EOP) > 0) {
+      is_new = 1;
+      net_rx(parts);
+    }
+    // 7.reset used descriptor
+    ds.status = 0;
+    ds.length = 0;
+    ds.errors = 0;
+    ds.csum = 0;
+    ds.special = 0;
+  }
+  
+  release(&e1000_rx_lock);
 }
 
 void

@@ -1,0 +1,18 @@
+1.kalloc较为简单，直接按cpu把大粒度锁切分未小粒度锁以降低冲突
+
+2.buffer-cache实验同样是利用“大锁分割为小锁”原理来实现减少锁争用的目的，
+将原有资源通过哈希分组后，使用不同的锁保护不同哈希桶中的Block-Buffer
+难点在于
+
+3.获取Block-Buffer的逻辑：
+Sync(检查缓存是否中) -是-> 累加Block-Buffer计数器并获取它的Sleeplock -> return
+                    -否-> 按Bucket遍历 -> Sync(获取未使用的LRU Block-Buffer并将其从哈希表中删除) -> Sync(重新检查缓存是否命中) -是-> 同上↑
+                                                                                                                          -否-> Sync(复用之前获取的LRU Block-Buffer并插入哈希表中) -> 获取复用Buffer的Sleeplock并return
+(ps: 上述Sync()表示括号中的操作由锁保护，对其他线程来说是原子的)
+细节: 1.遍历Buckets时需要注意一直将当前最优的LRU-Block-Buffer所在的Bucket锁住，直到退出循环并将其从哈希表中删除
+      2.“从哈希表中删除元素”然后“新增被删除的元素” 这两个操作不需要保证“原子性”，即无需加锁同步。因为操作1完成 -> 操作2完成这段时间Window，所有数据都是完整的，所以两个操作只需保证自己是原子的
+      3.当缓存块的引用计数器归0时不会立马从哈希表中删除，会延迟到下次申请空闲Block-Buffer时通过LRU策略选取并复用
+
+4.LRU机制使用CPU ticks时间戳实现而不是双向列表
+
+5.参考：https://blog.miigon.net/posts/s081-lab8-locks/#update-2021-01-07

@@ -1,0 +1,22 @@
+b bio.c:235
+
+b bio.c:277 if idx == 11
+
+b htremove if key == 0x1000002c0
+
+display checkhashtableentry(4)
+
+b bio.c:234
+p/x checkhashtableentry(0)
+0x80010a48
+p/x checkhashtableentry(1)
+0x80013f88
+p/x checkhashtableentry(2)
+0x800124e8
+p/x checkhashtableentry(3)
+0x80010a48
+
+p/x checkhashtableentry(0)->key
+p/x checkhashtableentry(1)->key
+p/x checkhashtableentry(2)->key
+p/x checkhashtableentry(3)->key

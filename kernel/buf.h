@@ -33,3 +33,9 @@ typedef struct hashbucket hashtable[HASHSIZE];
 #define HASHFUNC(x) ((x) % HASHSIZE)
 
 #define HASHKEY(dev, blockno) ((((uint64)(dev)) << 32) | (blockno))
+
+#define REVERSEDEV 0x666
+
+#define REVERSEBLOCKNO 0xffffff
+
+#define REVERSEKEY HASHKEY(REVERSEDEV, REVERSEBLOCKNO) // reversed hash key, never represent a valid block in disk

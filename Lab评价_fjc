@@ -1,18 +1,39 @@
-1.kalloc较为简单，直接按cpu把大粒度锁切分未小粒度锁以降低冲突
+1.kalloc较为简单，直接按cpu把大粒度锁切分未小粒度锁以降低冲突。kalloc当前版本存在死锁问题只不过测试脚本里面没有这种测试样例
 
 2.buffer-cache实验同样是利用“大锁分割为小锁”原理来实现减少锁争用的目的，
 将原有资源通过哈希分组后，使用不同的锁保护不同哈希桶中的Block-Buffer
-难点在于
+难点在于 死锁定位，消除多个函数都使用一把大锁，“操作/数据完整性需要获取多把锁”场景下如何避免死锁并降低Contention
 
 3.获取Block-Buffer的逻辑：
 Sync(检查缓存是否中) -是-> 累加Block-Buffer计数器并获取它的Sleeplock -> return
                     -否-> 按Bucket遍历 -> Sync(获取未使用的LRU Block-Buffer并将其从哈希表中删除) -> Sync(重新检查缓存是否命中) -是-> 同上↑
                                                                                                                           -否-> Sync(复用之前获取的LRU Block-Buffer并插入哈希表中) -> 获取复用Buffer的Sleeplock并return
 (ps: 上述Sync()表示括号中的操作由锁保护，对其他线程来说是原子的)
-细节: 1.遍历Buckets时需要注意一直将当前最优的LRU-Block-Buffer所在的Bucket锁住，直到退出循环并将其从哈希表中删除
+细节: 1.遍历Buckets时需要注意一直将当前最优的LRU-Block-Buffer所在的Bucket锁住，直到退出循环并将其从哈希表中删除。从哈希表中删除一个Block-Buffer后此buffer不再共享，所以无须加锁保护
       2.“从哈希表中删除元素”然后“新增被删除的元素” 这两个操作不需要保证“原子性”，即无需加锁同步。因为操作1完成 -> 操作2完成这段时间Window，所有数据都是完整的，所以两个操作只需保证自己是原子的
       3.当缓存块的引用计数器归0时不会立马从哈希表中删除，会延迟到下次申请空闲Block-Buffer时通过LRU策略选取并复用
 
 4.LRU机制使用CPU ticks时间戳实现而不是双向列表
 
 5.参考：https://blog.miigon.net/posts/s081-lab8-locks/#update-2021-01-07
+网上看了一些实现要么没有把“检查哈希表中是否存在”，“从哈希表中删除”和“向哈希表中添加”三个操作的顺序和加锁(原子化)设计好，导致死锁（比如：设计成先锁需要添加的Bucket 再锁需要执行删除的Bucket，两个原子操作“申请位于同一锁集合中的锁”及其容易造成死锁）
+要么把每个哈希桶设置成缓冲区一样的大小，初始化时锁数量和缓冲区大小翻几倍（目的是无需“从哈希表中删除”操作，相当于假设缓存区无限）
+
+
+Edit:
+第一个版本存在cache越用越小的bug，因为驱逐cache中某个未使用的block之后，如果其他线程已经添加了相应的disk-block到缓存，代码直接返回了，没有把已驱逐的block插回去
+
+利用“驱逐Unused Buffer b后，b变成线程私有对象，不再多线程共享”。
+所以驱逐b后只需要锁key-bucket就能实现
+      ①避免死锁（只有一把锁） 
+      ②避免一个区块有多份缓存（在key-bucket锁保护区域内再次检查block是否已被添加，Yes则把被驱逐的buffer b的blockno设置为不合法的值，并返回已添加的buffer；
+No则复用被驱逐buffer b并添加到key哈希桶）.
+
+上面这种做法的缺点：
+      1.破坏了哈希桶的一类完整性（哈希桶中元素的key通过hash函数得到的索引一定为哈希桶的编号），不过好在block-cache不依赖这个特性
+将被驱逐的block插回Cache时需要设置block的key，以防止插回且无效的block不会扰乱Cache中其他有效的disk-block.
+      2.多线程下可能会将一些后续要用到的Block从Cache中驱逐，因为多驱逐的block没有插回原来的哈希桶，所以会cache miss
+      3.从hash表中删除元素不能用key来删，因为可能由于第1点中“多驱逐的block”的key被设置为<保留值>而导致驱逐block没从bucket中删除掉，导致一个Buffer-Block存在于多个Bucket中
+      4.如果将“多驱逐的block”插回原来的bucket，容易造成死锁。相当于“变回”原来的“串行化删除-插入”模式
+
+优点：不用将“检查block是否cache hit”操作和“复用已驱逐块将其插入Cache中”操作加锁串行化/原子化

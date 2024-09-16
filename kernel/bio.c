@@ -25,9 +25,9 @@
 
 /* hash table interface */
 struct buf* htget(hashtable ht, uint64 key);
-struct buf* htremove(hashtable ht, uint64 key);
+struct buf* htremove(struct hashbucket* bucket, struct buf* evict);
 void htadd(hashtable ht, struct buf *et, uint64 key);
-struct buf* htget_sync(hashtable ht, uint64 key, int lockbucket); // get the buf pointer by key and lock buf if existed
+struct buf* htget_sync(hashtable ht, uint64 key); // get the buf pointer by key and lock buf if existed
 
 hashtable myht; // hashtable
 
@@ -76,7 +76,7 @@ bget(uint dev, uint blockno)
   int idx = HASHFUNC(key);
 
   // Query cache by hash
-  srcbukt = htget_sync(myht, key, 0); 
+  srcbukt = htget_sync(myht, key); 
   /** cache hit **/
   if (srcbukt) {
     return srcbukt;
@@ -103,29 +103,48 @@ bget(uint dev, uint blockno)
     if (!skip) release(&myht[i].lock); // release bucket
   }
   if (!freebukt) panic("bget: no block buffers");
-  
-  freebukt->refcnt = 1; // reuse the block
 
-  htremove(myht, freebukt->key); // remove old version of freebukt from cache
+  if (htremove(&myht[fri], freebukt) == 0) // remove old version of freebukt from cache
+    panic("htremove failed");
   release(&myht[fri].lock); // release reused buffer's bucket
 
   /* Optimized Tips: if fri == idx, don't need to release(&myht[fri].lock) and acquire myht[idx].lock in htget_sync(myht, key, 1)*/
 
+  /* after htremove, the Evicted Buffer-Block is no longer shared by threads, it's private to current thread*/
+
   // re-acquire myht[idx].lock and check if this block-buffer added by other threads
-  srcbukt = htget_sync(myht, key, 1);  // still lock myht[idx].lock
+  acquire(&myht[idx].lock);
+  srcbukt = htget(myht, key); 
   if (srcbukt) {
+    /* key-block had already been added into key-bucket by certain other thread */
+
+    // Inserting Evicted-And-Removed block-buffer back into Hash-Buffer-Cache 
+    // For avoiding making Cache smaller and smaller 
+    freebukt->refcnt = 0;
+    freebukt->key = REVERSEKEY;
+    freebukt->htnext = myht[idx].head;
+    myht[idx].head = freebukt;
+    
+    srcbukt->refcnt++; // increase count
+
+    release(&myht[idx].lock);
+    acquiresleep(&srcbukt->lock); // lock added block srcbukt
     return srcbukt;
+  } else {
+    /* key-block has not been added into key-bucket */
+    // reuse block freebukt
+    freebukt->dev = dev;
+    freebukt->blockno = blockno;
+    freebukt->valid = 0;
+    freebukt->refcnt = 1;
+    htadd(myht, freebukt, key); // add freebukt into cache 
+
+    release(&myht[idx].lock);
+    acquiresleep(&freebukt->lock); // lock evicted block freebukt
+    return freebukt;
   }
 
-  // reuse block freebukt
-  freebukt->dev = dev;
-  freebukt->blockno = blockno;
-  freebukt->valid = 0;
-  htadd(myht, freebukt, key); // add freebukt into cache 
-
-  release(&myht[idx].lock);
-  acquiresleep(&freebukt->lock); // lock block freebukt
-  return freebukt;
+  panic("绝对不可能");
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -209,30 +228,31 @@ struct buf * htget(hashtable ht, uint64 key) {
   return 0;
 }
 
-// remove entry from ht by key, return the removed entry's address
-struct buf * htremove(hashtable ht, uint64 key) {
-  int idx = HASHFUNC(key);
-  struct buf *et, *pet;
-
-  if (ht[idx].head == 0)
+// remove entry from hash bucket by entry's address, return the removed entry's address
+struct buf* htremove(struct hashbucket* bucket, struct buf* evict) {
+  if (bucket == 0)
     return 0;
 
-  pet = ht[idx].head;
-  if (pet->key == key) {
-    ht[idx].head = ht[idx].head->htnext;
-    pet->htnext = 0;
-    return pet;
+  if (bucket->head == evict) {
+    bucket->head = evict->htnext;
+    evict->htnext = 0;
+    return evict;
   }
-  for (et=pet->htnext; et; et = et->htnext) {
-    if (et->key == key) {
-      pet->htnext = et->htnext;
-      et->htnext = 0;
-      return et;
-    }
-    pet = et;
+
+  struct buf *pp, *p;
+  pp = bucket->head;
+  p = pp->htnext;
+
+  while (p != 0 && p != evict) {
+    pp = p;
+    p = p->htnext;
   }
-  // panic("htremove: not existed");
-  return 0;
+  if (!p) {
+    return 0;
+  }
+  pp->htnext = p->htnext;
+  p->htnext = 0;
+  return p;
 }
 
 // add an entry into ht
@@ -245,7 +265,7 @@ void htadd(hashtable ht, struct buf *et, uint64 key) {
 }
 
 // query concurrent-safely entry from ht by key, and lock returned buf. lockbucket=1 donnot release bucket-lock
-struct buf * htget_sync(hashtable ht, uint64 key, int lockbucket) {
+struct buf * htget_sync(hashtable ht, uint64 key) {
   int idx;
   struct buf *p;
   idx = HASHFUNC(key);
@@ -261,7 +281,7 @@ struct buf * htget_sync(hashtable ht, uint64 key, int lockbucket) {
     acquiresleep(&p->lock);
     return p;
   }
-  if (!lockbucket)
-    release(&ht[idx].lock);
+
+  release(&ht[idx].lock);
   return 0;
 }

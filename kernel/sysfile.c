@@ -283,6 +283,34 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+struct inode* followsymlink(struct inode* ip) {
+  struct inode* next;
+  if(ip == 0)
+    return 0;
+  
+  iunlockput(ip); // avoid re-acquire deadlock
+
+  int n = 10;
+  while(n-- > 0) {
+    next = namei(ip->symlinktarget); // symlinktarget not need protect by lock, it not changed
+    if(!next)
+      return 0;
+
+    ilock(next);
+    if(next->type == T_FILE) {
+      // iunlockput(next);  lock and return it
+      return next;
+    } else if (next->type == T_SYMLINK) {
+      ip = next;
+    } else {
+      panic("recurlink");
+    }
+    iunlockput(next);
+  }
+  
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -314,6 +342,16 @@ sys_open(void)
       end_op();
       return -1;
     }
+  }
+
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    struct inode* oip = followsymlink(ip);
+    if(oip == 0) {
+      // iunlockput(ip);
+      end_op();
+      return -1;
+    }
+    ip = oip;
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
@@ -482,5 +520,28 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64 sys_symlink(void) {
+  struct inode *ip;
+  char target[MAXPATH], path[MAXPATH];
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+  
+  begin_op();
+  ip = create(path, T_SYMLINK, 0, 0); // lock ip
+  if(ip == 0){
+    end_op(); 
+    return -1;
+  }
+
+  memmove(ip->symlinktarget, target, strlen(target)+1);
+  
+  // printf("sys_symlink: %s\n", ip->symlinktarget);
+  iunlockput(ip);
+  end_op();
+
   return 0;
 }

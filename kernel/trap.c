@@ -65,6 +65,28 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    if (r_stval() >= MAXVA) {
+      exit(-1);
+    }
+    pte_t *pte;
+    // check if need Lazy-Allocation
+    if ((pte = walk(p->pagetable, r_stval(), 0)) == 0) {
+      p->killed = 1;
+    } else {
+      if ((*pte & PTE_LZ) && 
+          (
+            ((r_scause() == 13) && !(*pte & PTE_R)) || 
+            (r_scause() == 15 && !(*pte & PTE_W))
+          )) { // Lazy-Allocated page
+
+        // allocate and init
+        if (alloclazyinit(r_stval()) == 0)
+          p->killed = 1;
+      } else {
+        p->killed = 1;
+      }
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

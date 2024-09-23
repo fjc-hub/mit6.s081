@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -141,6 +144,7 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->mmapsz = MMAPBASE;
   return p;
 }
 
@@ -157,6 +161,7 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+  p->mmapsz = MMAPBASE;
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -164,6 +169,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  memset(p->vma, 0, sizeof(p->vma));
 }
 
 // Create a user page table for a given process,
@@ -256,6 +263,9 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+  if (sz + n >= MMAPBASE)
+    panic("growproc: heap exceed MMAPBASE");
+
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
@@ -288,6 +298,30 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->mmapsz = p->mmapsz;
+
+  // Copy memory-mapped VMA metadata
+  for(i=0; i < VMASZ; i++) {
+    np->vma[i].address = p->vma[i].address;
+    np->vma[i].length = p->vma[i].length;
+    np->vma[i].fil = p->vma[i].fil;
+    np->vma[i].perm = p->vma[i].perm;
+    np->vma[i].writeback = p->vma[i].writeback;
+
+    if(np->vma[i].address == 0)
+      continue;
+
+    // copy memory-mapped area VMA
+    uint64 start = np->vma[i].address;
+    uint64 end = start + np->vma[i].length;
+    if (uvmcopy_range(p->pagetable, np->pagetable, start, end) < 0) {
+      return -1;
+    }
+
+    // increase ref count if file exists
+    if(p->vma[i].fil)
+      filedup(np->vma[i].fil);
+  } 
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -339,6 +373,7 @@ reparent(struct proc *p)
 void
 exit(int status)
 {
+  int i;
   struct proc *p = myproc();
 
   if(p == initproc)
@@ -357,6 +392,23 @@ exit(int status)
   iput(p->cwd);
   end_op();
   p->cwd = 0;
+
+  // unmap all memory-mapped area
+  for (i=0; i < VMASZ; i++) {
+    if(p->vma[i].writeback) {
+      if(writeback(&p->vma[i], p->vma[i].address, p->vma[i].length) < 0)
+        panic("exit: writeback");
+    }
+
+    // free not unmapped regions
+    if(p->vma[i].address >= MMAPBASE)
+      uvmdealloc(p->pagetable, p->vma[i].address + p->vma[i].length, p->vma[i].address);
+
+    if(p->vma[i].fil)
+      fileclose(p->vma[i].fil);
+
+    // vma fields contents initialize in freeproc in wait of parent process
+  }
 
   acquire(&wait_lock);
 
@@ -653,4 +705,53 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+struct VMA* getVmaInProc(struct VMA* vmas, uint64 addr) {
+  int i;
+  for(i=0; i < VMASZ; i++) {
+    if(vmas[i].address == 0)
+      continue;
+    if(vmas[i].address <= addr && addr < vmas[i].address+vmas[i].length)
+      break;
+  }
+  if (i >= VMASZ)
+    return 0;
+  
+  return &vmas[i];
+}
+
+// write modified user-memory-mapped page back to disk by physical address
+int writeback(struct VMA *vma, uint64 uaddr, int length) {
+
+  uint64 pa, off, r=PGROUNDUP(uaddr+length);
+  struct proc *p = myproc();
+  pte_t *pte;
+  uint le;
+  
+  uint64 tmp = uaddr - vma->address;
+  off = tmp;
+  uaddr = PGROUNDDOWN(uaddr);
+  while(uaddr < r) {
+    if ((pte = walk(p->pagetable, uaddr, 0)) == 0)
+      return -1;
+
+    pa = PTE2PA(*pte) + tmp;
+    le = PGSIZE - tmp;
+
+    if ((*pte & PTE_D)) {
+      begin_op();
+      ilock(vma->fil->ip);
+      if(writei(vma->fil->ip, 0, pa, off, le) != le)
+        panic("writeback: writei");
+      iunlock(vma->fil->ip);
+      end_op();
+    }
+
+    uaddr += PGSIZE;
+    off += le;
+    tmp = 0;
+  }
+
+  return 0;
 }

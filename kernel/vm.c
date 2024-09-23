@@ -178,7 +178,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    if(do_free){
+    if(do_free && !(*pte & PTE_LZ)){ // lazy-allocate page no need to free
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
@@ -236,6 +236,24 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     memset(mem, 0, PGSIZE);
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
       kfree(mem);
+      uvmdealloc(pagetable, a, oldsz);
+      return 0;
+    }
+  }
+  return newsz;
+}
+
+// allocate PTEs but no physical memory. insert user space [oldsz, newsz] area into page table 
+uint64 uvmalloc_lazy(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int perm) {
+
+  uint64 a;
+
+  if(oldsz > newsz)
+    return oldsz;
+  
+  oldsz = PGROUNDUP(oldsz);
+  for(a = oldsz; a < newsz; a += PGSIZE) {
+    if (mappages(pagetable, a, PGSIZE, 0, perm) != 0) {
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
@@ -327,6 +345,40 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
+// copy PTE from old in range [start, end) to new
+// skip Lazy-Allocat Pages
+int uvmcopy_range(pagetable_t old, pagetable_t new, uint64 start, uint64 end) {
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  char *mem;
+
+  end = PGROUNDUP(end);
+  for(i = PGROUNDDOWN(start); i < end; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy_range: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy_range: page not present");
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    mem = 0;
+    if(!(*pte & PTE_LZ)) {
+      if((mem = kalloc()) == 0)
+        goto err;
+      memmove(mem, (char*)pa, PGSIZE);
+    }
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto err;
+    }
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
 void
@@ -347,15 +399,28 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if(va0 >= MAXVA)
       return -1;
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+    
+    if ((pte = walk(pagetable, va0, 0)) == 0)
+      return -1;
+    if ((*pte & PTE_V) == 0)
+      return -1;
+
+    if ((*pte & PTE_LZ) && !(*pte & PTE_W)) { // Lazy-Allocated page
+      if (alloclazyinit(va0) < 0) { // allocate a new physical page
+        panic("copyout: alloclazyinit");
+      }
+    }
+
+    pa0 = PTE2PA(*pte);
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -372,15 +437,28 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if(va0 >= MAXVA)
       return -1;
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
+
+    if ((pte = walk(pagetable, va0, 0)) == 0)
+      return -1;
+    if ((*pte & PTE_V) == 0)
+      return -1;
+
+    if ((*pte & PTE_LZ) && !(*pte & PTE_R)) { // Lazy-Allocated page
+      if (alloclazyinit(va0) < 0) { // allocate a new physical page
+        panic("copyout: alloclazyinit");
+      }
+    }
+    
+    pa0 = PTE2PA(*pte);
     memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
     len -= n;

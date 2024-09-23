@@ -484,3 +484,152 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// char *mmap(char *addr, int length, int prot, int flags, int fd, int offset);
+// Assert addr==0, offset==0
+uint64 sys_mmap(void) {
+  int i, perm, length, prot, flags, fd;
+  uint64 addr;
+  struct file *pfi;
+  struct proc *p;
+
+  // check arguments
+  if(argint(1, &length)<0 || argint(2, &prot)<0 || argint(3, &flags)<0 || argfd(4, &fd, &pfi)<0)
+    return -1;
+  if(pfi->ip->size > length) {
+    printf("sys_mmap: small length\n");
+    return -1;
+  }
+  if(pfi->type != FD_INODE)
+    return -1;
+  if((pfi->readable && !pfi->writable) && !(flags & MAP_PRIVATE) && (prot & PROT_WRITE))
+    return -1; // read-only file can not map to writable VMA(except private vma region)
+
+  p = myproc();
+
+  // set PTEs permissions
+  perm = 0;
+  if(prot & PROT_READ)
+    perm |= PTE_R;
+  if(prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  // allocate PTEs but no physical-page
+  addr = p->mmapsz;
+  if (addr > MAXVA)
+    panic("sys_mmap: exceed MAXVA");
+  if((p->mmapsz = uvmalloc_lazy(p->pagetable, addr, addr + length, PTE_LZ | PTE_U)) == addr) { // increase process's memory-mapped area
+    return -1;
+  }
+  
+  // store mapped memory into VMA array of process
+  for(i=0; (i < VMASZ && p->vma[i].address != 0); i++)
+    ;
+  if(i >= VMASZ)
+    return -1;
+  p->vma[i].address = addr;
+  p->vma[i].length = length;
+  p->vma[i].fil = pfi;
+  p->vma[i].perm = perm;
+  if(flags & MAP_SHARED) 
+    p->vma[i].writeback = 1;
+  else 
+    p->vma[i].writeback = 0;
+
+  // increase open-file's ref count, need lock to protect
+  filedup(pfi);
+
+  return addr;
+}
+
+// int munmap(char *addr, length)
+uint64 sys_munmap(void) {
+  uint64 addr;
+  int length;
+  struct VMA* vma;
+
+  if(argaddr(0, &addr) || argint(1, &length) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+
+  // get memory mapped VMA
+  if((vma = getVmaInProc(p->vma, addr)) == 0)
+    return -1;
+
+  // check if arguments is valid
+  if(addr < vma->address || vma->address + vma->length < addr + length ||
+    (vma->address + vma->length > addr + length && addr > vma->address))
+    return -2; // punch a hole in the middle of the vma region
+
+  // check if write back disk
+  if(vma->writeback) {
+    if(writeback(vma, addr, length) < 0)
+        panic("exit: writeback");
+  }
+
+  // clear PTEs in pagetable and free Lazy-Allocated physical page
+  uvmdealloc(p->pagetable, addr+length, addr);
+
+  // check if vma need be cleaned
+  if(vma->address == addr && vma->length == length) {
+    // decrease file's ref count
+    fileclose(vma->fil);
+    // free vma slot
+    vma->address = 0;
+    vma->fil = 0;
+    vma->length = 0;
+    vma->perm = 0;
+    vma->writeback = 0;
+  } else {
+    if(addr == vma->address) {
+      vma->address = addr + length;
+    } else {
+      vma->address = addr;
+    }
+    vma->length -= length;
+  }
+
+  // shrink process's memory-mapped area
+  if (p->mmapsz == addr + length)
+    p->mmapsz = addr;
+
+  return 0;
+}
+
+// allocate lazily physical pages and init this physical page. 0=error, else=succeed
+// uaddr is user space address, return value is allocated physical page's address
+uint64 alloclazyinit(uint64 uaddr) {
+  char *pa;
+  struct proc *p = myproc();
+  pte_t *pte;
+  struct VMA* vma;
+  int readcnt;
+
+  // get PTE by uaddr address
+  if((pte = walk(p->pagetable, uaddr, 0)) == 0)
+    return 0;
+  // check if uaddr is in memory mapped page
+  if (!(*pte & PTE_LZ))
+    return 0;
+
+  // get memory mapped VMA
+  if((vma = getVmaInProc(p->vma, uaddr)) == 0)
+    return 0;
+
+  // allocate physical page and set true PTE's permission
+  pa = kalloc();
+  *pte = (PA2PTE(pa) | PTE_FLAGS(*pte) | vma->perm) & ~PTE_LZ;
+  
+  // initialize physial page by file's contents
+  ilock(vma->fil->ip);
+  if((readcnt = readi(vma->fil->ip, 0, (uint64)pa, (uint)(uaddr - vma->address), PGSIZE)) < 0) {
+    panic("alloclazyinit: readi");
+  } else if (readcnt >= 0) {
+    // contents in file is less than PGSIZE, init remainder with 0
+    memset(pa+readcnt, 0, PGSIZE - readcnt);
+  }
+  iunlock(vma->fil->ip);
+
+  return (uint64)pa;
+}
